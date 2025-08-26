@@ -39,7 +39,7 @@ const broadcastSchema = new mongoose.Schema(
     amount_to_deduct_from_user_wallet_amount: { type: Number, required: true },
 
     user_wallet_deduction_id: { type: mongoose.Schema.Types.ObjectId, ref: "MediciJournal", default: null },
-    user_wallet_deduction_status: { type: String, enum: ["DEDUCTION_SUCCESSFUL", "DEDUCTION_FAILED"], required: true },
+    user_wallet_deduction_status: { type: String, enum: ["DEDUCTION_SUCCESSFUL", "DEDUCTION_FAILED", "PAIDBACK"], required: true },
 
     total_broadcast_to_send: { type: Number, default: 1 },
     serial_of_broadcast: { type: Number, default: 1 },
