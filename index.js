@@ -6,7 +6,6 @@ const mongoose = require('mongoose');
 
 // Import your custom modules
 const Broadcast = require('./broadcastModel.js');
-const ledgerService = require('./ledgerService.js');
 
 
 // --- Configuration ---
@@ -35,42 +34,15 @@ let requestCount = 0; // Simple counter for requests
 const connectToDatabase = async () => {
     if (connection && mongoose.connection.readyState === 1) {
         console.log('Using existing database connection.');
+        sendDiscordMessage("DATABASE CONNECTION", "Using existing database connection.");
         return;
     }
     console.log('Establishing new database connection...');
     connection = await mongoose.connect(MONGODB_URI);
+    sendDiscordMessage("DATABASE CONNECTION", "Database connected successfully!");
     console.log('Database connected successfully!');
 };
 
-// --- Retry Utility with Exponential Backoff + Jitter ---
-const retryWithBackoff = async (fn, {
-  maxRetries = 5,
-  initialDelayMs = 500,
-  factor = 2,
-  jitter = true
-} = {}) => {
-  let attempt = 0;
-
-  while (attempt < maxRetries) {
-    try {
-      return await fn(); // Try operation
-    } catch (err) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        console.error(`Max retries reached. Failing... Error: ${err.message}`);
-        sendDiscordMessage("DATABASE FINDING ERROR", "Max retries reached. Failing... Error: " + err.message);
-        throw err;
-      }
-      // Exponential backoff + jitter
-      let backoffDelay = initialDelayMs * Math.pow(factor, attempt);
-      if (jitter) {
-        backoffDelay = backoffDelay / 2 + Math.random() * (backoffDelay / 2);
-      }
-      console.warn(`Retry attempt ${attempt} after ${Math.round(backoffDelay)}ms due to error: ${err.message}`);
-      await new Promise(res => setTimeout(res, backoffDelay));
-    }
-  }
-};
 
 // --- Helper Functions ---
 const sendDiscordMessage = async (title = "Webhook Event", formattedMessage) => {
@@ -84,7 +56,38 @@ const sendDiscordMessage = async (title = "Webhook Event", formattedMessage) => 
     }
 };
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- WhatsApp Status Progression Helper ---
+const validateAndProcessStatus = (currentStatus, previousStatus) => {
+    // Define the valid status progression order
+    const statusOrder = ['sent', 'delivered', 'read'];
+    
+    // Handle null/undefined/empty previous status
+    if (!previousStatus || previousStatus === null || previousStatus === undefined || previousStatus === '') {
+        return { isValid: true, shouldUpdate: true, reason: 'First status update (no previous status)' };
+    }
+    
+    // Get indices of current and previous statuses
+    const currentIndex = statusOrder.indexOf(currentStatus);
+    const previousIndex = statusOrder.indexOf(previousStatus);
+    
+    // If either status is not in our known order, allow the update
+    if (currentIndex === -1 || previousIndex === -1) {
+        return { isValid: true, shouldUpdate: true, reason: `Unknown status in progression - current: ${currentStatus}, previous: ${previousStatus}` };
+    }
+    
+    // Check if current status is in the correct progression order
+    if (currentIndex > previousIndex) {
+        // Valid progression: sent -> delivered -> read
+        return { isValid: true, shouldUpdate: true, reason: `Valid status progression: ${previousStatus} -> ${currentStatus}` };
+    } else if (currentIndex === previousIndex) {
+        // Same status, don't update
+        return { isValid: true, shouldUpdate: false, reason: `Same status received: ${currentStatus}` };
+    } else {
+        // Invalid progression (e.g., delivered -> sent)
+        return { isValid: false, shouldUpdate: false, reason: `Invalid status progression: ${previousStatus} -> ${currentStatus}` };
+    }
+};
 
 // --- Core Logic for Broadcasts ---
 const captureBroadcastResult = async (data) => {
@@ -102,10 +105,39 @@ const captureBroadcastResult = async (data) => {
         const whatsapp_message_id = statusUpdate.id;
         let savedBroadcastInfo = null;
 
-        // Retry with exponential backoff on findOne
-        savedBroadcastInfo = await retryWithBackoff(() =>
-            Broadcast.findOne({ whatsapp_message_id: whatsapp_message_id })
-        );
+        // console.log(`[DEBUG] Starting database lookup loop for whatsapp_message_id: ${whatsapp_message_id}`);
+        // --- Using Exponential Backoff with Jitter (Recommended) ---
+  
+        const maxRetries = 5;
+        const baseDelay = 1000; // 1 second in milliseconds
+        const maxDelay = 16000; // 16 seconds max wait time
+  
+        for (let i = 0; i < maxRetries; i++) {
+          savedBroadcastInfo = await Broadcast.findOne({ whatsapp_message_id: whatsapp_message_id });
+          sendDiscordMessage("BROADCAST FINDING", `Database lookup result: ${savedBroadcastInfo ? 'Found' : 'Not found'}, Database lookup attempt ${i + 1}/${maxRetries}`);
+  
+          if (savedBroadcastInfo) {
+            break; // Success, exit the loop
+          }
+  
+          if (i === maxRetries - 1) {
+            // console.log(`[DEBUG] Max retries reached. Giving up.`);
+            break;
+          }
+  
+          // Calculate the exponential backoff component
+          const exponentialDelay = baseDelay * Math.pow(2, i);
+  
+          // Add jitter (a random value between 0 and the base delay)
+          const jitter = Math.random() * baseDelay;
+  
+          // Calculate the final delay, ensuring it doesn't exceed maxDelay
+          const delay = Math.min(exponentialDelay + jitter, maxDelay);
+  
+          // console.log(`[DEBUG] Waiting ${(delay / 1000).toFixed(2)} seconds before next attempt...`);
+  
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
 
         console.log(`Found broadcast info: ${!!savedBroadcastInfo}`);
         sendDiscordMessage("BROADCAST FINDING", `Found broadcast info: ${!!savedBroadcastInfo}`);
@@ -119,12 +151,27 @@ const captureBroadcastResult = async (data) => {
             throw new Error("Deduction already paid back for this broadcast.");
         }
 
+        // Validate status progression before updating
+        const currentStatus = statusUpdate.status;
+        const previousStatus = savedBroadcastInfo.delivery_status_from_whatsapp;
+        const statusValidation = validateAndProcessStatus(currentStatus, previousStatus);
+
+        console.log(`Status validation: current=${currentStatus}, previous=${previousStatus}, shouldUpdate=${statusValidation.shouldUpdate}, reason=${statusValidation.reason}`);
+        sendDiscordMessage("BROADCAST FINDING", `Status validation: current=${currentStatus}, previous=${previousStatus}, shouldUpdate=${statusValidation.shouldUpdate}, reason=${statusValidation.reason}`);
+
+        if (!statusValidation.shouldUpdate) {
+            console.log(`Skipping status update: ${statusValidation.reason}`);
+            sendDiscordMessage("BROADCAST FINDING", `Skipping status update: ${statusValidation.reason}`);
+            return; // Exit early without updating
+        }
+
         const updateRawMetaWebhookResponse = await Broadcast.updateOne(
             { whatsapp_message_id: whatsapp_message_id },
             { $set: { raw_meta_webhook_response: JSON.stringify(data) } }
         );
 
         sendDiscordMessage("BROADCAST FINDING", `Updating raw_meta_webhook_response... ${JSON.stringify(updateRawMetaWebhookResponse)}`);
+
         const updateData = {
             event_timestamp: statusUpdate.timestamp,
             delivery_status_from_whatsapp: statusUpdate.status,
@@ -133,27 +180,19 @@ const captureBroadcastResult = async (data) => {
         if (updateData.delivery_status_from_whatsapp === "failed") {
             sendDiscordMessage("BROADCAST FINDING", "Message failed. Processing payback...");
             console.log('Message failed. Processing payback...');
-            const paybackStatus = await ledgerService.paybackCreditsInWallet(
-                savedBroadcastInfo.internal_user_id,
-                savedBroadcastInfo.eazybe_org_id,
-                savedBroadcastInfo.amount_to_deduct_from_user_wallet_amount,
-                savedBroadcastInfo.amount_to_deduct_from_user_wallet_currency
-            );
-
-            updateData.failure_reason_code = statusUpdate.errors?.[0]?.code;
-            updateData.failure_reason_text = statusUpdate.errors?.[0]?.message;
-
-            if (paybackStatus) {
-                updateData.user_wallet_deduction_status = "PAIDBACK";
-                updateData.amount_to_deduct_from_user_wallet_amount = 0;
-                console.log('Payback successful. Marked as PAIDBACK.');
-                sendDiscordMessage("BROADCAST FINDING", "Payback successful. Marked as PAIDBACK.");
-            }
+            const paybackResponse = await axios.post("https://6fd2474eb5d3.ngrok-free.app/v2/broadcast/process-refund-webhook", {
+                headers: { "Content-Type": "application/json", "private-key": "123456789" },
+                payload: {
+                    data: data,
+                    savedBroadcastInfo: savedBroadcastInfo,
+                }
+            });
+            sendDiscordMessage("PROCESS REFUND WEBHOOK", `Payback response: ${JSON.stringify(paybackResponse)}`);
         }
 
         const updateResult = await Broadcast.updateOne({ whatsapp_message_id: whatsapp_message_id }, { $set: updateData });
         console.log(`Update result for ${whatsapp_message_id}:`, updateResult);
-        sendDiscordMessage("BROADCAST FINDING", `Update result for ${whatsapp_message_id}: ${JSON.stringify(updateResult)}, status: ${updateData.delivery_status_from_whatsapp}`);
+        sendDiscordMessage("BROADCAST FINDING", `Update result for ${whatsapp_message_id}: ${JSON.stringify(updateResult)}, status: ${updateData.delivery_status_from_whatsapp} (${statusValidation.reason})`);
     } catch (error) {
         console.error(`Error in captureBroadcastResult for payload: ${JSON.stringify(data)}`);
         console.error(`Error: ${error.message}`);

@@ -24,7 +24,7 @@ const broadcastSchema = new mongoose.Schema(
     recipient_phone_number: { type: String, required: true },
 
     dispatch_status_to_whatsapp: { type: String, enum: ["SENT_TO_BSP", "FAILED_TO_SEND"], required: true },
-    delivery_status_from_whatsapp: { type: String, enum: ["delivered", "read", "failed", null], default: null },
+    delivery_status_from_whatsapp: { type: String, enum: ["sent", "delivered", "read", "failed", null], default: null },
 
     failure_reason_code: { type: String, default: "" },
     failure_reason_text: { type: String, default: "" },
