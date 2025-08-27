@@ -57,6 +57,8 @@ const sendDiscordMessage = async (title = "Webhook Event", formattedMessage) => 
 };
 
 
+
+
 // --- WhatsApp Status Progression Helper ---
 const validateAndProcessStatus = (currentStatus, previousStatus) => {
     // Define the valid status progression order
@@ -180,19 +182,33 @@ const captureBroadcastResult = async (data) => {
         if (updateData.delivery_status_from_whatsapp === "failed") {
             sendDiscordMessage("BROADCAST FINDING", "Message failed. Processing payback...");
             console.log('Message failed. Processing payback...');
-            const paybackResponse = await axios.post("https://6fd2474eb5d3.ngrok-free.app/v2/broadcast/process-refund-webhook", {
-                headers: { "Content-Type": "application/json", "private-key": "123456789" },
-                payload: {
+            
+            try {
+                const paybackResponse = await axios.post("https://a79f43b2d018.ngrok-free.app/v2/broadcast/process-refund-webhook", {
                     data: data,
                     savedBroadcastInfo: savedBroadcastInfo,
-                }
-            });
-            sendDiscordMessage("PROCESS REFUND WEBHOOK", `Payback response: ${JSON.stringify(paybackResponse)}`);
+                }, {
+                    headers: { 
+                        "Content-Type": "application/json", 
+                        "private-key": "123456789" 
+                    },
+                    timeout: 30000
+                });
+                sendDiscordMessage("PROCESS REFUND WEBHOOK", `Payback response: ${JSON.stringify(paybackResponse.data)}`);
+            } catch (paybackError) {
+                console.error("Error processing payback:", paybackError.message);
+                sendDiscordMessage("PROCESS REFUND WEBHOOK", `Error processing payback: ${paybackError.message}`);
+            }
+            
+
         }
 
+        // Only update the database if the status is not failed, failed statuses are handled by the payback process
+        if (updateData.delivery_status_from_whatsapp !== "failed") {
         const updateResult = await Broadcast.updateOne({ whatsapp_message_id: whatsapp_message_id }, { $set: updateData });
         console.log(`Update result for ${whatsapp_message_id}:`, updateResult);
         sendDiscordMessage("BROADCAST FINDING", `Update result for ${whatsapp_message_id}: ${JSON.stringify(updateResult)}, status: ${updateData.delivery_status_from_whatsapp} (${statusValidation.reason})`);
+        }
     } catch (error) {
         console.error(`Error in captureBroadcastResult for payload: ${JSON.stringify(data)}`);
         console.error(`Error: ${error.message}`);
